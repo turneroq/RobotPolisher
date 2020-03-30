@@ -18,8 +18,8 @@
 
 
 
-#define JOY_X   A8
-#define JOY_Y   A9
+#define JOY_X A8
+#define JOY_Y A9
 
 #define X_FORWARD_THRESHOLD 800
 #define X_BACK_THRESHOLD 200
@@ -36,6 +36,15 @@
 #define CE  7
 #define CSN 6
 //---------------- RF SETTINGS ----------------
+
+
+//---------------- BATTARY_CHECKER SETTINGS ----------------
+#define BATTERY_CHECK_PIN A0
+#define THRESHOLD_UPPER   800 //CHECK REAL VALUES
+#define THRESHOLD_MIDDLE  700 //CHECK REAL VALUES
+#define THRESHOLD_LOWER   600 //CHECK REAL VALUES
+//---------------- BATTARY_CHECKER SETTINGS ----------------
+
 
 //---------------- SCREEN SETTINGS ----------------
 #define CS    13
@@ -74,19 +83,39 @@ struct robot_coords
   int y;
 } coords, prev_coords;
 
+struct _timer
+{
+  unsigned long last_time_input_timer;
+  unsigned long last_time_draw_timer;
+  unsigned long last_time_battery_timer;
+} timer;
+
 const byte success_packet = 2;
 
-unsigned long last_time_timer = 0;
+struct _cache
+{
+  int last_cached_value;
+  int first_visit;//int used instead bool for memory alignment
+} cache;
+
 
 void setup()
 {
-#ifdef DEBUG_SERIAL
+#if DEBUG_SERIAL
   Serial.begin(SERIAL_RATE);
 #endif
   display_setup();
   radio_setup();
   
-  last_time_timer = millis();
+  pinMode(A0, INPUT);
+
+//initialize structs values
+  timer.last_time_input_timer = millis();
+  timer.last_time_draw_timer = millis();
+
+  cache.last_cached_value = -1;
+  cache.first_visit = true;//must be true
+
   coords.x = 0;
   coords.y = 0;
   prev_coords.x = 0;
@@ -118,9 +147,10 @@ void display_setup()
   screen.setFont(BigFont);
 }
 
+
 bool radio_send(byte data, uint64_t len)
 {
-  #ifdef DEBUG_SERIAL
+  #if DEBUG_SERIAL
   Serial.print("SENDING: ");
   Serial.println(data);
   #endif
@@ -132,20 +162,20 @@ bool radio_send(byte data, uint64_t len)
     //the message is successfully acknowledged by the receiver OR the timeout/retransmit maxima weren't reached
     if(!feedback_handle(1))
     {
-      #ifdef DEBUG_SERIAL
+      #if DEBUG_SERIAL
       Serial.println("SENDING ACK WARNING");
       #endif
     }
   }
   else
   {
-    #ifdef DEBUG_SERIAL
+    #if DEBUG_SERIAL
     //message isn't successfully acknowledged by the receiver OR the timeout/retransmit maxima were reached
     Serial.println("SENDING TIMEOUT ERROR");
     #endif
     return false;
   }
-  #ifdef DEBUG_SERIAL
+  #if DEBUG_SERIAL
   Serial.print("SENT: ");
   Serial.println(data);
   #endif
@@ -158,7 +188,7 @@ bool feedback_handle(byte pipe_num)
   if(!radio.available(&pipe_num))//empty ack
   {
     //Assert that ACK MUSTN'T BE EMPTY!
-    #ifdef DEBUG_SERIAL
+    #if DEBUG_SERIAL
     Serial.println("ACK EMPTY ERROR");// but truly it isn't error. I wanna that ack size > 0
     #endif
     return false;
@@ -179,13 +209,13 @@ bool feedback_handle(byte pipe_num)
     radio.read(&code_ACK, 1);
     if(code_ACK == 2)
     {
-      #ifdef DEBUG_SERIAL
+      #if DEBUG_SERIAL
       Serial.println("ACK: 2");
       #endif
     }
     else
     {
-      #ifdef DEBUG_SERIAL
+      #if DEBUG_SERIAL
       Serial.println("ACK: TRASH");
       #endif
     }
@@ -227,7 +257,7 @@ void handle_input()
   //!!! JOY position: wires down
   if(coord_changed())
   {
-    #ifdef DEBUG_SERIAL
+    #if DEBUG_SERIAL
     Serial.print("X = ");
     Serial.println(coords.x);
     Serial.print("Y = ");
@@ -284,19 +314,83 @@ bool coord_changed()
 
 
 //timer
-bool passed(unsigned long msec, unsigned long last_time_passed = last_time_timer)
+bool timer_input(unsigned long msec, unsigned long last_time_passed = timer.last_time_input_timer)
 {
   if(millis() - last_time_passed > msec)
   {
-    last_time_timer = millis();
+    timer.last_time_input_timer = millis();
     return true;
   }
   return false;
 }
+
+
+bool timer_draw(unsigned long msec, unsigned long last_time_passed = timer.last_time_draw_timer)
+{
+  if(millis() - last_time_passed > msec)
+  {
+    timer.last_time_draw_timer = millis();
+    return true;
+  }
+  return false;
+}
+
+
+bool timer_battery(unsigned long msec, unsigned long last_time_passed = timer.last_time_battery_timer)
+{
+  if(millis() - last_time_passed > msec)
+  {
+    timer.last_time_battery_timer = millis();
+    return true;
+  }
+  return false;
+}
+
 #include "RenderLib.h"
+
+int battery_checker()
+{
+  if(timer_battery(10000) || cache.first_visit)
+  {
+    cache.first_visit = 0;
+    int current_value = analogRead(BATTERY_CHECK_PIN);//get data from check pin
+    cache.last_cached_value = current_value;
+    if(!current_value)
+    {
+      //Error
+      //In most cases the circuit voltage divider is opened
+      #if DEBUG_SERIAL
+      Serial.println("ERROR IN BATTERY CHECKER. CHECK CONNECTION WITH BATTERY_CHECK_PIN");
+      #endif
+      return -1;
+    }
+    if(current_value >= THRESHOLD_UPPER)
+    {
+      return 3;
+    }
+    else if(THRESHOLD_MIDDLE <= current_value && current_value < THRESHOLD_UPPER)
+    {
+      return 2;
+    }
+    else if(THRESHOLD_LOWER <= current_value && current_value < THRESHOLD_MIDDLE)
+    {
+      return 1;
+    }
+    else
+    {
+      return 0;
+    }
+  }
+  else
+  {
+    return cache.last_cached_value;
+  }
+}
+
 
 void draw()
 {
+  header_properties_setup();//MUST BE FIRST
   draw_battery();
   draw_line_under_header();
   draw_network_columns();    
@@ -305,17 +399,14 @@ void draw()
 
 void loop()
 {
-  
-  if(passed(50))
+  if(timer_input(50))
   {
     get_input();//get input from analog ports JOYSTICKS
     handle_input();
   } 
-  if(passed(2000))
+  if(timer_draw(2000))
   {
-    Serial.println("PASSED");
+    Serial.println("DRAWED");
     draw();
   }
-
-  
 }
