@@ -393,7 +393,8 @@ void draw()
   header_properties_setup();//MUST BE FIRST
   draw_battery();
   draw_line_under_header();
-  draw_network_columns();    
+  draw_network_columns();
+  draw_time_elapsed();
 }
 
 
@@ -404,7 +405,7 @@ void loop()
     get_input();//get input from analog ports JOYSTICKS
     handle_input();
   } 
-  if(timer_draw(2000))
+  if(timer_draw(1000))
   {
     Serial.println("DRAWED");
     draw();

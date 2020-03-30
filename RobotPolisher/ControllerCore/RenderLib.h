@@ -9,6 +9,7 @@ struct _header_
   int padding_net_from_battery;
   int net_column_width;
   int padding_between_columns;
+  int padding_time_from_right;
 } header;
 
 //MUST BE CALLED FIRST
@@ -20,6 +21,7 @@ void header_properties_setup()
   header.padding_net_from_battery = 10;
   header.net_column_width = 5;
   header.padding_between_columns = 5;
+  header.padding_time_from_right = 130;
 }
 
 
@@ -32,7 +34,6 @@ void draw_battery()
                   4 * header.x_up_left_corner_battery,
                   3 * header.y_up_left_corner_battery);
 
-  //TODO: add inner rects!
   int checker_data = battery_checker();
   switch(checker_data)
   {
@@ -65,7 +66,7 @@ void draw_battery()
     }
     case 0:
     {
-      // very close to critical minimum
+      // very close to critical minimum charge
       screen.fillRect(header.x_up_left_corner_battery,
                       header.y_up_left_corner_battery,
                       1 * header.x_up_left_corner_battery,
@@ -74,7 +75,7 @@ void draw_battery()
     }
     default:
     {
-      //all errors here
+      //all errors go here
       break;
     }
   }
@@ -83,17 +84,15 @@ void draw_battery()
 void draw_line_under_header()
 {
     screen.setColor(255, 255, 255);
-    int x2 = header.x_up_left_corner_battery;//must be equal header.x_up_left_corner_battery
+    int x2 = header.x_up_left_corner_battery;
     int y2 = 3 * header.y_up_left_corner_battery + header.padding_line_from_battery;
     int y1 = 3 * header.y_up_left_corner_battery;
+
     //left side
     screen.drawLine(0, y1, x2, y2);
-
     //mid side. draw under header line
     screen.drawLine(x2, y2, MAX_X_SIZE - x2, y2);
-
     //right side
-
     screen.drawLine(MAX_X_SIZE - x2, y2, MAX_X_SIZE, y1);    
 }
 
@@ -123,4 +122,43 @@ void draw_network_columns()
     screen.fillRect(x1_highest, y1_highest, x1_highest + width, 3 * y1);
     //draw highest
    // screen.fillRect();
+}
+
+void draw_time_elapsed()
+{
+  // format: Hrs:Min:Sec
+  String time_print = "";
+  unsigned long time = millis() / 1000;
+  unsigned long time_hrs = time / 3600;
+  unsigned long time_min = (time - time_hrs * 3600) / 60;
+  unsigned long time_sec = time - time_hrs * 3600 - time_min * 60;
+  Serial.print("Hours = ");
+  Serial.println(time_hrs);
+  Serial.print("Mins = ");
+  Serial.println(time_min);
+  Serial.print("Seconds = ");
+  Serial.println(time_sec);
+  char buf[3] = {0};
+  if(time_hrs)
+  {
+    sprintf(buf,"%lu", time_hrs);
+    time_print += buf;
+    time_print += ':';
+  }
+  if(time_min)
+  {
+    if(time_min < 10)
+      time_print += '0';
+    sprintf(buf,"%lu", time_min);
+    time_print += buf;
+    time_print += ':';
+  }
+  else
+  {
+    time_print += "00:";
+  }
+  if(time_sec < 10)
+    time_print += '0';
+  time_print += time_sec;
+  screen.print(time_print, MAX_X_SIZE - header.padding_time_from_right, header.y_up_left_corner_battery+5);
 }
