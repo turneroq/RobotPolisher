@@ -38,13 +38,17 @@
 //---------------- RF SETTINGS ----------------
 
 
-//---------------- BATTARY_CHECKER SETTINGS ----------------
+//---------------- BATTERY_CHECKER SETTINGS ----------------
 #define BATTERY_CHECK_PIN A0
 #define THRESHOLD_UPPER   800 //CHECK REAL VALUES
 #define THRESHOLD_MIDDLE  700 //CHECK REAL VALUES
 #define THRESHOLD_LOWER   600 //CHECK REAL VALUES
-//---------------- BATTARY_CHECKER SETTINGS ----------------
+//---------------- BATTERY_CHECKER SETTINGS ----------------
 
+//---------------- BUTTONS SETTINGS ----------------
+#define BUTTON_SWITCH_POLISH        21
+#define BUTTON_SWITCH_AUTO_CONTROL  20
+//---------------- BUTTONS SETTINGS ----------------
 
 //---------------- SCREEN SETTINGS ----------------
 #define CS    13
@@ -98,16 +102,21 @@ struct _cache
   int first_visit;//int used instead bool for memory alignment
 } cache;
 
+//Flags used by interrupt routines
+volatile int state_auto_control = LOW;
+volatile int state_polish_control = LOW;
+
 
 void setup()
 {
+  
 #if DEBUG_SERIAL
   Serial.begin(SERIAL_RATE);
 #endif
   display_setup();
   radio_setup();
   
-  pinMode(A0, INPUT);
+  pinMode(BATTERY_CHECK_PIN, INPUT);
 
 //initialize structs values
   timer.last_time_input_timer = millis();
@@ -119,7 +128,12 @@ void setup()
   coords.x = 0;
   coords.y = 0;
   prev_coords.x = 0;
-  prev_coords.y = 0;   
+  prev_coords.y = 0;
+
+  //TURN(ON, OFF) auto control
+  attachInterrupt(digitalPinToInterrupt(BUTTON_SWITCH_AUTO_CONTROL), set_robot_auto_control, FALLING  );
+  //TURN(ON, OFF) polish
+  attachInterrupt(digitalPinToInterrupt(BUTTON_SWITCH_POLISH), set_robot_polish_control, FALLING  );
 }
 
 
@@ -299,6 +313,11 @@ void handle_input()
 }
 
 
+void handle_buttons()
+{
+  //
+}
+
 bool coord_changed()
 {
   if(abs(prev_coords.x - coords.x) > NOISE_THRESHOLD)// X COORDS CHANGED
@@ -310,6 +329,18 @@ bool coord_changed()
     return false;
   }
   return false;
+}
+
+//interrupt routine
+void set_robot_auto_control()
+{
+    state_auto_control = !state_auto_control;
+}
+
+//interrupt routine
+void set_robot_polish_control()
+{
+    state_polish_control = !state_polish_control;
 }
 
 
@@ -395,11 +426,15 @@ void draw()
   draw_line_under_header();
   draw_network_columns();
   draw_time_elapsed();
+  draw_flags();
 }
+
+
 
 
 void loop()
 {
+  
   if(timer_input(50))
   {
     get_input();//get input from analog ports JOYSTICKS

@@ -10,6 +10,11 @@ struct _header_
   int net_column_width;
   int padding_between_columns;
   int padding_time_from_right;
+  int padding_text_from_line;
+  int polish_flag_radius;
+  int padding_circle_from_line;
+  int padding_between_words;
+  int padding_control_circle_first_letter;
 } header;
 
 //MUST BE CALLED FIRST
@@ -22,6 +27,12 @@ void header_properties_setup()
   header.net_column_width = 5;
   header.padding_between_columns = 5;
   header.padding_time_from_right = 130;
+  header.padding_text_from_line = 30;
+  header.polish_flag_radius = 10;
+  header.padding_circle_from_line = 50;
+  header.padding_between_words = 20;
+  header.padding_control_circle_first_letter = 72;
+  //screen.setBackColor(0, 0, 0);// background color for printed objects
 }
 
 
@@ -161,4 +172,62 @@ void draw_time_elapsed()
     time_print += '0';
   time_print += time_sec;
   screen.print(time_print, MAX_X_SIZE - header.padding_time_from_right, header.y_up_left_corner_battery+5);
+}
+
+void draw_flags()
+{
+  //drawing if polishing is on or off
+  String str1 = "POLISHER";
+  screen.print(str1,
+        header.x_up_left_corner_battery,
+        header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_text_from_line );
+  screen.drawCircle(
+    4 * header.x_up_left_corner_battery + header.padding_net_from_battery,
+    3 * header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_circle_from_line,
+    header.polish_flag_radius);
+    if(state_polish_control == HIGH)
+    {
+      screen.setColor(0, 255, 0);
+      screen.fillCircle(
+                        4 * header.x_up_left_corner_battery + header.padding_net_from_battery,
+                        3 * header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_circle_from_line,
+                        header.polish_flag_radius - 1);
+    }
+    else//LOW
+    {
+      screen.setColor(255, 0, 0);
+      screen.fillCircle(
+                        4 * header.x_up_left_corner_battery + header.padding_net_from_battery,
+                        3 * header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_circle_from_line,
+                        header.polish_flag_radius - 1);
+    }
+  screen.setColor(255, 255, 255);
+  //drawing if auto control is on or off
+  String str2 = "AUTOMATIC";
+  int x_first_letter = 2 * (4 * header.x_up_left_corner_battery + header.padding_net_from_battery) + header.padding_between_words;
+  screen.print(str2,
+        x_first_letter,
+        header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_text_from_line );
+  screen.drawCircle(
+    x_first_letter + header.padding_control_circle_first_letter,
+    3 * header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_circle_from_line,
+    header.polish_flag_radius);
+    
+    if(state_auto_control == HIGH)
+    {
+      screen.setColor(0, 255, 0);
+      screen.fillCircle(
+                        x_first_letter + header.padding_control_circle_first_letter,
+                        3 * header.y_up_left_corner_battery + header.padding_line_from_battery + header.padding_circle_from_line,
+                        header.polish_flag_radius-1);
+    }
+    else//LOW
+    {
+      screen.setColor(255, 0, 0);
+      screen.fillCircle(
+                        x_first_letter + header.padding_control_circle_first_letter,
+                        3 * header.y_up_left_corner_battery + header.padding_line_from_battery + 50,
+                        header.polish_flag_radius-1);
+    }
+    screen.setColor(255, 255, 255);
 }
