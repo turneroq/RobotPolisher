@@ -52,7 +52,6 @@
 //MEGA HARDWARE MOSI 51, MISO 50, SCK 52
 
 
-
 CustomStepper MLeft(MLeft_IN1, MLeft_IN2, MLeft_IN3, MLeft_IN4, (byte[]){8, B1000, B1100, B0100, B0110, B0010, B0011, B0001, B1001}, MLEFT_SPR, MLEFT_RPM, CW);
 CustomStepper MRight(MRight_IN1, MRight_IN2, MRight_IN3, MRight_IN4);
 RF24 radio(CE, CSN);
@@ -72,7 +71,6 @@ struct motor_status
   byte speed;
   byte reserved;
 } state, prev_state;
-
 
 
 typedef enum {forward = 1, back, left, right, stop, ping} commands;

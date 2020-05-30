@@ -17,7 +17,6 @@
 #include <UTFT.h>
 
 
-
 #define PIN_JOY_X A8
 #define PIN_JOY_Y A9
 
@@ -31,7 +30,12 @@
 #define SERIAL_RATE 115200
 #define COMMUNICATION_WORD_SIZE 5
 
-#define TIMEOUT_THRESHOLD 200 // microseconds
+//---------------- PING SETTINGS ----------------
+#define TIMEOUT_THRESHOLD             200000 // 200ms in microsecs
+#define BEST_NETWORK_TIME_THRESHOLD   40000 // 40ms in microsecs
+#define MEDIUM_NETWORK_TIME_THRESHOLD 100000 // 100ms in microsecs
+//---------------- PING SETTINGS ----------------
+
 
 //---------------- RF SETTINGS ----------------
 #define PIN_CE  7
@@ -46,10 +50,12 @@
 #define THRESHOLD_LOWER   600 //CHECK REAL VALUES
 //---------------- BATTERY_CHECKER SETTINGS ----------------
 
+
 //---------------- BUTTONS SETTINGS ----------------
 #define PIN_BUTTON_SWITCH_POLISH        21
 #define PIN_BUTTON_SWITCH_AUTO_CONTROL  20
 //---------------- BUTTONS SETTINGS ----------------
+
 
 //---------------- SCREEN SETTINGS ----------------
 #define PIN_CS    13
@@ -58,28 +64,20 @@
 #define PIN_MOSI  10
 #define PIN_SCK   9
 #define ORIENTATION LANDSCAPE // or PORTRAIT
+UTFT screen(TFT01_22SP, PIN_MOSI, PIN_SCK, PIN_CS, PIN_RESET, PIN_DC); 
+extern uint8_t BigFont[]; // external fonts
 //---------------- SCREEN SETTINGS ----------------
 
 
-UTFT screen(TFT01_22SP, PIN_MOSI, PIN_SCK, PIN_CS, PIN_RESET, PIN_DC); 
-
-extern uint8_t BigFont[]; // external fonts
-
-RF24 radio(PIN_CE, PIN_CSN);
 ////---------------- RF CONFIG ----------------
+RF24 radio(PIN_CE, PIN_CSN);
 byte pipe_addresses[][6] = {"1Node","2Node"}; // first - robot, second - remote controller 
 typedef enum { role_rc_tx = 1} role_en; // for future scaling
 role_en role = role_rc_tx;
 ////---------------- RF CONFIG ----------------
 
-const char* str_comms[4] = {
-  "forward",
-  "back",
-  "left",
-  "right"
-};//commands for robot
 
-typedef enum {no_cmd, forward = 1, on = 1, backward, off = 2, stop} commands;
+typedef enum {no_cmd, forward = 1, on = 1, backward, off = 2, stop, best, medium, bad, timeout} commands;
 commands comms = forward;
 
 struct robot_coords
@@ -93,17 +91,16 @@ struct _timer
   uint32_t last_time_input_timer;
   uint32_t last_time_draw_timer;
   uint32_t last_time_battery_timer;
-  uint32_t last_time_sender_timer
+  uint32_t last_time_sender_timer;
+  uint32_t ping_initial_time;
 } timer;
-
-const byte success_packet = 2;
 
 struct _cache
 {
-  int32_t last_cached_value;
+  int16_t last_cached_value;
   uint16_t first_visit;
-  uint8_t check_ping;//
-  uint8_t _alignment;//
+  uint8_t check_ping;
+  uint8_t network_drawing_flag;
 } cache;
 
 struct _commands_cache
@@ -119,42 +116,41 @@ struct _commands_cache
 } commands_cache;
 
 //Flags used by interrupt routines
-volatile int state_auto_control = LOW;
-volatile int state_polish_control = LOW;
+volatile uint8_t state_auto_control = 0;
+volatile uint8_t state_polish_control = 0;
 
 
 void setup()
 {
-  
 #if DEBUG_SERIAL
   Serial.begin(SERIAL_RATE);
 #endif
   display_setup();
-  radio_setup();
+  radio_setup();  
   
-  pinMode(PIN_BATTERY_CHECK, INPUT);
-
-//initialize structs values
-  timer.last_time_input_timer = millis();
-  timer.last_time_draw_timer = millis();
-  timer.last_time_battery_timer = millis();
-  timer.last_time_sender_timer = millis();
-
-  cache.last_cached_value = -1;
-  cache.first_visit = 1;//must be true
-  cache.check_ping = 0;
-  cache._alignment = 0;
-
+  //initialize structs values
   coords.x = 0;
   coords.y = 0;
   prev_coords.x = 0;
   prev_coords.y = 0;
 
+  uint32_t t = millis();
+  timer.last_time_input_timer = t;
+  timer.last_time_draw_timer = t;
+  timer.last_time_battery_timer = t;
+  timer.last_time_sender_timer = t;
+  timer.ping_initial_time = 0;
+
+  cache.last_cached_value = -1;
+  cache.first_visit = 1;//must be true
+  cache.check_ping = 0;
+  cache.network_drawing_flag = 0;
+
   commands_cache.left_wheel_cmd = 0;
   commands_cache.right_wheel_cmd = 0;
   commands_cache.auto_mode_cmd = 0;
   commands_cache.front_motor_polisher_cmd = 0;
-  commands_cache.pind_cmd = 0;
+  commands_cache.ping_cmd = 0;
   commands_cache._alignment_a = 0;
   commands_cache._alignment_b = 0;
   commands_cache._alignment_c = 0;
@@ -178,6 +174,7 @@ void radio_setup()
     radio.openWritingPipe(pipe_addresses[0]);//pipe address to write
     radio.openReadingPipe(1, pipe_addresses[1]);//pipe num and address to read
   }
+  const uint8_t success_packet = 254;
   radio.startListening();//enable receiver mode 
   radio.writeAckPayload(1, &success_packet, sizeof(success_packet)); //preload ACK to include it in response message
 }
@@ -191,15 +188,10 @@ void display_setup()
 }
 
 
-bool radio_send(char* data, uint64_t len)
+uint8_t radio_send(uint8_t* data, uint8_t bytes)
 {
-  #if DEBUG_SERIAL
-  Serial.print("SENDING: ");
-  Serial.println(data);
-  #endif
   radio.stopListening();
-  //uint64_t cur_time = micros();
-  bool done = radio.write(&data, len);
+  uint8_t done = radio.write(data, bytes);
   if(done)
   {
     //the message is successfully acknowledged by the receiver OR the timeout/retransmit maxima weren't reached
@@ -216,17 +208,13 @@ bool radio_send(char* data, uint64_t len)
     //message isn't successfully acknowledged by the receiver OR the timeout/retransmit maxima were reached
     Serial.println("SENDING TIMEOUT ERROR");
     #endif
-    return false;
-  }
-  #if DEBUG_SERIAL
-  Serial.print("SENT: ");
-  Serial.println(data);
-  #endif
-  return true;
+    return 0;
+  }  
+  return 1;
 }
 
 
-bool feedback_handle(byte pipe_num)
+uint8_t feedback_handle(byte pipe_num)
 {
   if(!radio.available(&pipe_num))//empty ack
   {
@@ -234,7 +222,7 @@ bool feedback_handle(byte pipe_num)
     #if DEBUG_SERIAL
     Serial.println("ACK EMPTY ERROR");// but truly it isn't error. I wanna that ack size > 0
     #endif
-    return false;
+    return 0;
   }
   else //non-empty ack
   {
@@ -248,7 +236,7 @@ bool feedback_handle(byte pipe_num)
       return false;
     }
     */
-    byte code_ACK = 0;
+    uint8_t code_ACK = 0;
     radio.read(&code_ACK, 1);
     if(code_ACK == 2)
     {
@@ -261,13 +249,10 @@ bool feedback_handle(byte pipe_num)
       #if DEBUG_SERIAL
       Serial.println("ACK: TRASH");
       #endif
-    }
-    if(!validate_ack(code_ACK))
-    {
-      return false;
+      return 0;
     }
   }
-  return true;  
+  return 1;  
 }
 
 
@@ -296,7 +281,6 @@ void wheels_cmd_setter()
       Serial.println(coords.y);
     }
   #endif
-  
   if(!coord_changed())
   {
     //Serial.println("COORDS NOT CHANGED");
@@ -306,36 +290,26 @@ void wheels_cmd_setter()
   }
   else if (coords.x > X_FORWARD_THRESHOLD)
   {
-    //both wheels go ahead
-    //radio_send(10 * forward + forward, sizeof(forward));
     commands_cache.left_wheel_cmd = forward;
     commands_cache.right_wheel_cmd = forward;
   }
   else if (coords.x < X_BACK_THRESHOLD)
   {
-    //bothe wheels go back
-    //radio_send(10 * back + back, sizeof(back));
     commands_cache.left_wheel_cmd = backward;
     commands_cache.right_wheel_cmd = backward;
   }
   else if (coords.y < Y_LEFT_THRESHOLD)
   {
-    //forward + left = turn left
-    //radio_send(10 * stop + forward, sizeof(forward));
     commands_cache.left_wheel_cmd = stop;
     commands_cache.right_wheel_cmd = forward;
   }
   else if (coords.y > Y_RIGHT_THRESHOLD)
   {
-    //forward + right = turn right
-    //radio_send(10 * forward + stop, sizeof(forward));
     commands_cache.left_wheel_cmd = forward;
     commands_cache.right_wheel_cmd = stop;
   }
   else if(( X_BACK_THRESHOLD < coords.x && coords.x < X_FORWARD_THRESHOLD ) && ( Y_LEFT_THRESHOLD < coords.y && coords.y < Y_RIGHT_THRESHOLD))
   {
-    //stop
-    //radio_send(10 * stop + stop, sizeof(stop));
     commands_cache.left_wheel_cmd = stop;
     commands_cache.right_wheel_cmd = stop;
   }
@@ -348,6 +322,8 @@ void buttons_checker()
   //TODO IF CORRESPONDING BUTTON WAS PRESSED 
   //commands_cache.auto_mode_cmd = STATUS_AUTO_MODE_BUTTON
   //commands_cache.front_motor_polisher_cmd = STATUS_FRONT_MOTOR_POLISHER_BUTTON
+  commands_cache.auto_mode_cmd = state_auto_control;
+  commands_cache.front_motor_polisher_cmd = state_polish_control;
 }
 
 
@@ -360,17 +336,17 @@ void ping_checker()
 }
 
 
-bool coord_changed()
+uint8_t coord_changed()
 {
   if(abs(prev_coords.x - coords.x) > NOISE_THRESHOLD)// X COORDS CHANGED
   {
-    return true;
+    return 1;
   }
   else if(abs(prev_coords.y - coords.y) > NOISE_THRESHOLD)// Y COORDS CHANGED
   {
-    return false;
+    return 1;
   }
-  return false;
+  return 0;
 }
 
 
@@ -439,12 +415,16 @@ uint8_t timer_battery(uint32_t msec, uint32_t last_time_passed = timer.last_time
 #include "RenderLib.h"
 
 
-int32_t battery_checker()
+int16_t battery_checker()
 {
+  /*
+    1)Using voltage divider and get aprox 5V from new 9V battery
+    2)Eventually voltage will drop and value on PIN_BATTERY_CHECK will decrease
+  */
   if(timer_battery(10000) || cache.first_visit)
   {
     cache.first_visit = 0;
-    int32_t current_value = analogRead(PIN_BATTERY_CHECK);//get data from check pin
+    int16_t current_value = analogRead(PIN_BATTERY_CHECK);//get data from check pin
     cache.last_cached_value = current_value;
     if(!current_value)
     {
@@ -490,7 +470,6 @@ void draw()
 }
 
 
-
 void compose_send_commands_word()
 {
   /*
@@ -509,7 +488,51 @@ void compose_send_commands_word()
     commands_cache.front_motor_polisher_cmd,
     commands_cache.ping_cmd
   };
-  radio_send(&word, sizeof(uint8_t) * COMMUNICATION_WORD_SIZE);
+  if(commands_cache.ping_cmd)
+  {
+    timer.ping_initial_time = micros();
+  }
+  radio_send(word, sizeof(uint8_t) * COMMUNICATION_WORD_SIZE);
+}
+
+
+void pong_response_check()
+{
+  if(commands_cache.ping_cmd) // ping was sent
+  {
+    uint8_t timeout_ = 0;
+    //wait here for pong
+    while(!radio.available())
+    {
+      if(micros() - timer.ping_initial_time > TIMEOUT_THRESHOLD)
+      {
+        timeout_ = 1;
+        break;
+      }
+    }
+    if(timeout_)
+    {
+      //TODO CHANGE STATUS FOR DRAWING BAD NETWORK CONNECTION
+      cache.network_drawing_flag = timeout;
+    }
+    else
+    {
+      //TODO CHANGE STATUS FOR DRAWING QUALITY NETWORK CONNECTION
+      uint32_t response_time = micros() - timer.ping_initial_time;
+      if(response_time <= BEST_NETWORK_TIME_THRESHOLD)
+      {
+        cache.network_drawing_flag = best;
+      }
+      else if(response_time > BEST_NETWORK_TIME_THRESHOLD && response_time <= MEDIUM_NETWORK_TIME_THRESHOLD)
+      {
+        cache.network_drawing_flag = medium;
+      }
+      else if(response_time > MEDIUM_NETWORK_TIME_THRESHOLD && response_time < TIMEOUT_THRESHOLD)
+      {
+        cache.network_drawing_flag = bad;
+      }
+    }
+  }
 }
 
 
@@ -517,6 +540,12 @@ void loop()
 {
   if(timer_input(50))
   {
+    /*
+      1)Get input
+      2)Sets cmds for wheels or sets ping_cmd
+      3)Check button status and sets auto + front_polish_cmd
+      4)Sets ping cmd if coords(input) doesn't change
+    */
     get_input();//get input from analog ports JOYSTICKS
     wheels_cmd_setter();
     buttons_checker();
@@ -524,10 +553,19 @@ void loop()
   } 
   if(timer_sender(100))
   {
+    /*
+      1)Create communication word from commands cache
+      2)Send word
+      3)Wait if pong came
+    */
     compose_send_commands_word();
+    pong_response_check();
   }
   if(timer_draw(1000))
   {
+    /*
+      1)Drawing to screen
+    */
     Serial.println("DREW");
     draw();
   }
