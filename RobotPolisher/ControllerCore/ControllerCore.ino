@@ -18,8 +18,8 @@
 
 
 
-#define JOY_X A8
-#define JOY_Y A9
+#define PIN_JOY_X A8
+#define PIN_JOY_Y A9
 
 #define X_FORWARD_THRESHOLD 800
 #define X_BACK_THRESHOLD 200
@@ -29,42 +29,43 @@
 
 #define DEBUG_SERIAL 1
 #define SERIAL_RATE 115200
+#define COMMUNICATION_WORD_SIZE 5
 
 #define TIMEOUT_THRESHOLD 200 // microseconds
 
 //---------------- RF SETTINGS ----------------
-#define CE  7
-#define CSN 6
+#define PIN_CE  7
+#define PIN_CSN 6
 //---------------- RF SETTINGS ----------------
 
 
 //---------------- BATTERY_CHECKER SETTINGS ----------------
-#define BATTERY_CHECK_PIN A0
+#define PIN_BATTERY_CHECK A0
 #define THRESHOLD_UPPER   800 //CHECK REAL VALUES
 #define THRESHOLD_MIDDLE  700 //CHECK REAL VALUES
 #define THRESHOLD_LOWER   600 //CHECK REAL VALUES
 //---------------- BATTERY_CHECKER SETTINGS ----------------
 
 //---------------- BUTTONS SETTINGS ----------------
-#define BUTTON_SWITCH_POLISH        21
-#define BUTTON_SWITCH_AUTO_CONTROL  20
+#define PIN_BUTTON_SWITCH_POLISH        21
+#define PIN_BUTTON_SWITCH_AUTO_CONTROL  20
 //---------------- BUTTONS SETTINGS ----------------
 
 //---------------- SCREEN SETTINGS ----------------
-#define CS    13
-#define RESET 12
-#define DC    11
-#define MOSI  10
-#define SCK   9
+#define PIN_CS    13
+#define PIN_RESET 12
+#define PIN_DC    11
+#define PIN_MOSI  10
+#define PIN_SCK   9
 #define ORIENTATION LANDSCAPE // or PORTRAIT
 //---------------- SCREEN SETTINGS ----------------
 
 
-UTFT screen(TFT01_22SP, MOSI, SCK, CS, RESET, DC); 
+UTFT screen(TFT01_22SP, PIN_MOSI, PIN_SCK, PIN_CS, PIN_RESET, PIN_DC); 
 
 extern uint8_t BigFont[]; // external fonts
 
-RF24 radio(CE, CSN);
+RF24 radio(PIN_CE, PIN_CSN);
 ////---------------- RF CONFIG ----------------
 byte pipe_addresses[][6] = {"1Node","2Node"}; // first - robot, second - remote controller 
 typedef enum { role_rc_tx = 1} role_en; // for future scaling
@@ -78,29 +79,44 @@ const char* str_comms[4] = {
   "right"
 };//commands for robot
 
-typedef enum {forward = 1, back, left, right, stop, ping} commands;
+typedef enum {no_cmd, forward = 1, on = 1, backward, off = 2, stop} commands;
 commands comms = forward;
 
 struct robot_coords
 {
-  int x;
-  int y;
+  uint16_t x;
+  uint16_t y;
 } coords, prev_coords;
 
 struct _timer
 {
-  unsigned long last_time_input_timer;
-  unsigned long last_time_draw_timer;
-  unsigned long last_time_battery_timer;
+  uint32_t last_time_input_timer;
+  uint32_t last_time_draw_timer;
+  uint32_t last_time_battery_timer;
+  uint32_t last_time_sender_timer
 } timer;
 
 const byte success_packet = 2;
 
 struct _cache
 {
-  int last_cached_value;
-  int first_visit;//int used instead bool for memory alignment
+  int32_t last_cached_value;
+  uint16_t first_visit;
+  uint8_t check_ping;//
+  uint8_t _alignment;//
 } cache;
+
+struct _commands_cache
+{
+  uint8_t left_wheel_cmd;
+  uint8_t right_wheel_cmd;
+  uint8_t auto_mode_cmd;
+  uint8_t front_motor_polisher_cmd;
+  uint8_t ping_cmd;
+  uint8_t _alignment_a;
+  uint8_t _alignment_b;
+  uint8_t _alignment_c;
+} commands_cache;
 
 //Flags used by interrupt routines
 volatile int state_auto_control = LOW;
@@ -116,24 +132,37 @@ void setup()
   display_setup();
   radio_setup();
   
-  pinMode(BATTERY_CHECK_PIN, INPUT);
+  pinMode(PIN_BATTERY_CHECK, INPUT);
 
 //initialize structs values
   timer.last_time_input_timer = millis();
   timer.last_time_draw_timer = millis();
+  timer.last_time_battery_timer = millis();
+  timer.last_time_sender_timer = millis();
 
   cache.last_cached_value = -1;
-  cache.first_visit = true;//must be true
+  cache.first_visit = 1;//must be true
+  cache.check_ping = 0;
+  cache._alignment = 0;
 
   coords.x = 0;
   coords.y = 0;
   prev_coords.x = 0;
   prev_coords.y = 0;
 
+  commands_cache.left_wheel_cmd = 0;
+  commands_cache.right_wheel_cmd = 0;
+  commands_cache.auto_mode_cmd = 0;
+  commands_cache.front_motor_polisher_cmd = 0;
+  commands_cache.pind_cmd = 0;
+  commands_cache._alignment_a = 0;
+  commands_cache._alignment_b = 0;
+  commands_cache._alignment_c = 0;
+  
   //TURN(ON, OFF) auto control
-  attachInterrupt(digitalPinToInterrupt(BUTTON_SWITCH_AUTO_CONTROL), set_robot_auto_control, FALLING  );
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_SWITCH_AUTO_CONTROL), set_robot_auto_control, FALLING  );
   //TURN(ON, OFF) polish
-  attachInterrupt(digitalPinToInterrupt(BUTTON_SWITCH_POLISH), set_robot_polish_control, FALLING  );
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_SWITCH_POLISH), set_robot_polish_control, FALLING  );
 }
 
 
@@ -162,7 +191,7 @@ void display_setup()
 }
 
 
-bool radio_send(byte data, uint64_t len)
+bool radio_send(char* data, uint64_t len)
 {
   #if DEBUG_SERIAL
   Serial.print("SENDING: ");
@@ -242,81 +271,94 @@ bool feedback_handle(byte pipe_num)
 }
 
 
-bool validate_ack(byte ack)
-{
-  if(ack != 2) return false;
-  return true;
-}
-
-
 void get_input()
 {
   //save previous values
   prev_coords = coords;
 
   //getting new values
-  coords.x = analogRead(JOY_X);
-  coords.y = analogRead(JOY_Y); 
+  coords.x = analogRead(PIN_JOY_X);
+  coords.y = analogRead(PIN_JOY_Y); 
 }
 
 
-//send commands corresponds coords of input
-void handle_input()
+void wheels_cmd_setter()
 {
-  //send commands on every wheel
-  //EXAMPLE forward both, wheels forward = 1, therefore 11
-  //back both, wheels back = 2, therefore 22
-  //left wheel back = 2, right forward = 1, therefore 21
+  //Func sets commands for robot's wheels
 
-  //!!! JOY position: wires down
-  if(coord_changed())
-  {
-    #if DEBUG_SERIAL
-    Serial.print("X = ");
-    Serial.println(coords.x);
-    Serial.print("Y = ");
-    Serial.println(coords.y);
-    #endif
-  }
+  //!!! JOY position: wires down  
+  #if DEBUG_SERIAL
+    if(coord_changed())
+    {
+      Serial.print("X = ");
+      Serial.println(coords.x);
+      Serial.print("Y = ");
+      Serial.println(coords.y);
+    }
+  #endif
   
   if(!coord_changed())
   {
     //Serial.println("COORDS NOT CHANGED");
     //Nothing changed. Or noise in analog ports
+    cache.check_ping = on;
     return;
   }
   else if (coords.x > X_FORWARD_THRESHOLD)
   {
     //both wheels go ahead
-    radio_send(10 * forward + forward, sizeof(forward));
+    //radio_send(10 * forward + forward, sizeof(forward));
+    commands_cache.left_wheel_cmd = forward;
+    commands_cache.right_wheel_cmd = forward;
   }
   else if (coords.x < X_BACK_THRESHOLD)
   {
     //bothe wheels go back
-    radio_send(10 * back + back, sizeof(back));
+    //radio_send(10 * back + back, sizeof(back));
+    commands_cache.left_wheel_cmd = backward;
+    commands_cache.right_wheel_cmd = backward;
   }
   else if (coords.y < Y_LEFT_THRESHOLD)
   {
     //forward + left = turn left
-    radio_send(10 * stop + forward, sizeof(forward));
+    //radio_send(10 * stop + forward, sizeof(forward));
+    commands_cache.left_wheel_cmd = stop;
+    commands_cache.right_wheel_cmd = forward;
   }
   else if (coords.y > Y_RIGHT_THRESHOLD)
   {
     //forward + right = turn right
-    radio_send(10 * forward + stop, sizeof(forward));
+    //radio_send(10 * forward + stop, sizeof(forward));
+    commands_cache.left_wheel_cmd = forward;
+    commands_cache.right_wheel_cmd = stop;
   }
   else if(( X_BACK_THRESHOLD < coords.x && coords.x < X_FORWARD_THRESHOLD ) && ( Y_LEFT_THRESHOLD < coords.y && coords.y < Y_RIGHT_THRESHOLD))
   {
     //stop
-    radio_send(10 * stop + stop, sizeof(stop));
+    //radio_send(10 * stop + stop, sizeof(stop));
+    commands_cache.left_wheel_cmd = stop;
+    commands_cache.right_wheel_cmd = stop;
+  }
+  cache.check_ping = no_cmd;
+}
+
+
+void buttons_checker()
+{
+  //TODO IF CORRESPONDING BUTTON WAS PRESSED 
+  //commands_cache.auto_mode_cmd = STATUS_AUTO_MODE_BUTTON
+  //commands_cache.front_motor_polisher_cmd = STATUS_FRONT_MOTOR_POLISHER_BUTTON
+}
+
+
+void ping_checker()
+{
+  if(cache.check_ping)
+  {
+    commands_cache.ping_cmd = 1;
   }
 }
 
-
-void handle_buttons()
-{
-  //
-}
 
 bool coord_changed()
 {
@@ -331,11 +373,13 @@ bool coord_changed()
   return false;
 }
 
+
 //interrupt routine
 void set_robot_auto_control()
 {
     state_auto_control = !state_auto_control;
 }
+
 
 //interrupt routine
 void set_robot_polish_control()
@@ -344,54 +388,70 @@ void set_robot_polish_control()
 }
 
 
-//timer
-bool timer_input(unsigned long msec, unsigned long last_time_passed = timer.last_time_input_timer)
+//input checker timer 
+uint8_t timer_input(uint32_t msec, uint32_t last_time_passed = timer.last_time_input_timer)
 {
   if(millis() - last_time_passed > msec)
   {
     timer.last_time_input_timer = millis();
-    return true;
+    return 1;
   }
-  return false;
+  return 0;
 }
 
 
-bool timer_draw(unsigned long msec, unsigned long last_time_passed = timer.last_time_draw_timer)
+//drawing routine timer
+uint8_t timer_draw(uint32_t msec, uint32_t last_time_passed = timer.last_time_draw_timer)
 {
   if(millis() - last_time_passed > msec)
   {
     timer.last_time_draw_timer = millis();
-    return true;
+    return 1;
   }
-  return false;
+  return 0;
 }
 
 
-bool timer_battery(unsigned long msec, unsigned long last_time_passed = timer.last_time_battery_timer)
+//sender routine timer
+uint8_t timer_sender(uint32_t msec, uint32_t last_time_passed = timer.last_time_sender_timer)
+{
+  if(millis() - last_time_passed > msec)
+  {
+    timer.last_time_sender_timer = millis();
+    return 1;
+  }
+  return 0;
+}
+
+
+//battery checker timer
+uint8_t timer_battery(uint32_t msec, uint32_t last_time_passed = timer.last_time_battery_timer)
 {
   if(millis() - last_time_passed > msec)
   {
     timer.last_time_battery_timer = millis();
-    return true;
+    return 1;
   }
-  return false;
+  return 0;
 }
+
 
 #include "RenderLib.h"
 
-int battery_checker()
+
+int32_t battery_checker()
 {
   if(timer_battery(10000) || cache.first_visit)
   {
     cache.first_visit = 0;
-    int current_value = analogRead(BATTERY_CHECK_PIN);//get data from check pin
+    int32_t current_value = analogRead(PIN_BATTERY_CHECK);//get data from check pin
     cache.last_cached_value = current_value;
     if(!current_value)
     {
       //Error
       //In most cases the circuit voltage divider is opened
       #if DEBUG_SERIAL
-      Serial.println("ERROR IN BATTERY CHECKER. CHECK CONNECTION WITH BATTERY_CHECK_PIN");
+      Serial.println("ERROR IN BATTERY CHECKER. CHECK CONNECTION WITH PIN_BATTERY_CHECK");
       #endif
       return -1;
     }
@@ -431,18 +491,44 @@ void draw()
 
 
 
+void compose_send_commands_word()
+{
+  /*
+    array of some values[
+      LEFT_WHEEL_CMD,           CMDs {0:NO_CMD, 1:FORWARD, 2:BACKWARD, 3:STOP}
+      RIGHT_WHEEL_CMD,          CMDs {0:NO_CMD, 1:FORWARD, 2:BACKWARD, 3:STOP}
+      AUTO_MOD_WHEELS_CMD,      CMDs {0:NO_CMD, 1:ON, 2:OFF}
+      FRONT_MOTOR_POLISHER_CMD  CMDs {0:NO_CMD, 1:ON, 2:OFF}
+      PING_CMD                  CMDs {0:NO_CMD, 1:SEND_FEEDBACK}
+    ]
+  */
+  uint8_t word[COMMUNICATION_WORD_SIZE] = {
+    commands_cache.left_wheel_cmd,
+    commands_cache.right_wheel_cmd,
+    commands_cache.auto_mode_cmd,
+    commands_cache.front_motor_polisher_cmd,
+    commands_cache.ping_cmd
+  };
+  radio_send(&word, sizeof(uint8_t) * COMMUNICATION_WORD_SIZE);
+}
+
 
 void loop()
 {
-  
   if(timer_input(50))
   {
     get_input();//get input from analog ports JOYSTICKS
-    handle_input();
+    wheels_cmd_setter();
+    buttons_checker();
+    ping_checker();
   } 
+  if(timer_sender(100))
+  {
+    compose_send_commands_word();
+  }
   if(timer_draw(1000))
   {
-    Serial.println("DRAWED");
+    Serial.println("DREW");
     draw();
   }
 }
